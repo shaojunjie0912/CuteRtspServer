@@ -1,0 +1,10 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+1. C++ 代码优先采用现代 C++17 和 20 标准。
+2. C++ 代码符合 [CppCoreGuidelines](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines) 中的条款。
+3. C++ 代码风格遵循 [Google 风格](https://zh-google-styleguide.readthedocs.io/en/latest/google-cpp-styleguide/)。
+4. 代码注释使用简体中文。
+5. 项目使用 [xmake](https://xmake.io/#/) 构建，如果需要第三方库，请使用 [xrepo](https://xrepo.xmake.io/#/) 中的。
