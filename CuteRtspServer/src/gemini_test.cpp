@@ -1,3 +1,10 @@
+#include <arpa/inet.h>
+#include <fcntl.h>  // 用于 fcntl (可选，例如设置非阻塞)
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>  // 用于 close, read, write, usleep (如果不用 C++ 线程库)
+
 #include <chrono>        // 用于 std::chrono::*
 #include <cstring>       // 用于 strerror
 #include <format>        // 用于 std::format (C++20 格式化)
@@ -8,14 +15,6 @@
 #include <system_error>  // 用于 std::system_error, std::errc
 #include <thread>        // 用于 std::this_thread::sleep_for
 #include <vector>        // 用于 std::vector (缓冲区)
-
-// Linux/POSIX Socket 头文件
-#include <arpa/inet.h>
-#include <fcntl.h>  // 用于 fcntl (可选，例如设置非阻塞)
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>  // 用于 close, read, write, usleep (如果不用 C++ 线程库)
 
 // 定义常量
 constexpr int SERVER_PORT = 8554;
@@ -45,7 +44,7 @@ std::string handleCmd_OPTIONS(int cseq) {
 
 std::string handleCmd_DESCRIBE(int cseq, std::string_view url) {
     std::string sdp;
-    std::string localIp = "127.0.0.1";  // 默认或从 url 解析
+    std::string localIp{"127.0.0.1"};
 
     // 尝试从 URL 解析 IP (简易方式，可能不健壮)
     // rtsp://192.168.1.10:8554/live
@@ -122,19 +121,20 @@ std::string handleCmd_PLAY(int cseq) {
 }
 
 // --- 客户端处理函数 ---
-void doClient(int clientSockfd, const std::string& clientIP, int clientPort) {
-    std::cout << "Handling client: " << clientIP << ":" << clientPort << std::endl;
+void doClient(int connfd, const std::string& ip, int port) {
+    std::cout << "Handling client: " << ip << ":" << port << std::endl;
 
-    std::vector<char> rBuf(BUFFER_SIZE);
-    std::string sBuf;  // 用于存储响应
+    std::vector<char> recv_buf(BUFFER_SIZE);  // 用于存储接收到的数据
+    std::string send_buf;                     // 用于存储响应
 
-    std::string method;
-    std::string url;
-    std::string version;
-    int cseq = 0;
-    int clientRtpPort = -1;
-    int clientRtcpPort = -1;
-    bool playing = false;  // 标记是否处于 PLAY 状态
+    std::string method;   // RTSP 方法
+    std::string url;      // RTSP URL
+    std::string version;  // RTSP 版本
+
+    int cseq = 0;             // 请求序号
+    int clientRtpPort = -1;   // RTP 端口
+    int clientRtcpPort = -1;  // RTCP 端口
+    bool playing = false;     // 标记是否处于 PLAY 状态
 
     try {
         while (true) {
@@ -145,26 +145,24 @@ void doClient(int clientSockfd, const std::string& clientIP, int clientPort) {
             cseq = 0;
             // clientRtpPort, clientRtcpPort 通常在 SETUP 后保持不变
 
-            ssize_t recvLen = recv(clientSockfd, rBuf.data(), rBuf.size() - 1, 0);
+            ssize_t recv_len = recv(connfd, recv_buf.data(), recv_buf.size() - 1, 0);
 
-            if (recvLen < 0) {
+            if (recv_len < 0) {
                 // EINTR 表示信号中断，可以重试
                 if (errno == EINTR) continue;
                 perror("recv failed");
                 break;
             }
-            if (recvLen == 0) {
-                std::cout << "Client " << clientIP << ":" << clientPort << " disconnected."
-                          << std::endl;
+            if (recv_len == 0) {
+                std::cout << "Client " << ip << ":" << port << " disconnected." << std::endl;
                 break;
             }
 
-            rBuf[recvLen] = '\0';  // 确保 C 风格字符串结束符 (虽然我们主要用 C++)
-            std::string_view requestView(rBuf.data(), recvLen);
+            recv_buf[recv_len] = '\0';  // 确保 C 风格字符串结束符 (虽然我们主要用 C++)
+            std::string_view requestView(recv_buf.data(), recv_len);
 
             std::cout << ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n";
-            std::cout << "Received from " << clientIP << ":" << clientPort << ":\n"
-                      << requestView << std::endl;
+            std::cout << "Received from " << ip << ":" << port << ":\n" << requestView << std::endl;
 
             // --- 解析 RTSP 请求 ---
             std::istringstream requestStream{std::string(requestView)};  // 从 string_view 创建流
@@ -230,15 +228,15 @@ void doClient(int clientSockfd, const std::string& clientIP, int clientPort) {
 
             // --- 根据方法生成响应 ---
             if (method == "OPTIONS") {
-                sBuf = handleCmd_OPTIONS(cseq);
+                send_buf = handleCmd_OPTIONS(cseq);
             } else if (method == "DESCRIBE") {
-                sBuf = handleCmd_DESCRIBE(cseq, url);
+                send_buf = handleCmd_DESCRIBE(cseq, url);
             } else if (method == "SETUP") {
                 if (clientRtpPort != -1) {
-                    sBuf = handleCmd_SETUP(cseq, clientRtpPort);
+                    send_buf = handleCmd_SETUP(cseq, clientRtpPort);
                 } else {
                     // 发送错误响应，例如 461 Unsupported Transport
-                    sBuf = std::format(
+                    send_buf = std::format(
                         "RTSP/1.0 461 Unsupported Transport\r\n"
                         "CSeq: {}\r\n"
                         "\r\n",
@@ -246,7 +244,7 @@ void doClient(int clientSockfd, const std::string& clientIP, int clientPort) {
                     std::cerr << "SETUP failed: Could not parse client_port" << std::endl;
                 }
             } else if (method == "PLAY") {
-                sBuf = handleCmd_PLAY(cseq);
+                send_buf = handleCmd_PLAY(cseq);
                 playing = true;  // 标记进入 PLAY 状态
             }
             // TODO: 添加 TEARDOWN 等其他方法的处理
@@ -254,7 +252,7 @@ void doClient(int clientSockfd, const std::string& clientIP, int clientPort) {
             else {
                 std::cerr << "Unsupported method: " << method << std::endl;
                 // 发送 501 Not Implemented 或 405 Method Not Allowed
-                sBuf = std::format(
+                send_buf = std::format(
                     "RTSP/1.0 405 Method Not Allowed\r\n"
                     "CSeq: {}\r\n"
                     "Allow: OPTIONS, DESCRIBE, SETUP, PLAY\r\n"  // 列出支持的方法
@@ -264,20 +262,19 @@ void doClient(int clientSockfd, const std::string& clientIP, int clientPort) {
 
             // --- 发送响应 ---
             std::cout << "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n";
-            std::cout << "Sending to " << clientIP << ":" << clientPort << ":\n"
-                      << sBuf << std::endl;
-            ssize_t sendLen = send(clientSockfd, sBuf.c_str(), sBuf.length(), 0);
+            std::cout << "Sending to " << ip << ":" << port << ":\n" << send_buf << std::endl;
+            ssize_t sendLen = send(connfd, send_buf.c_str(), send_buf.length(), 0);
             if (sendLen < 0) {
                 perror("send failed");
                 break;
             }
-            if (sendLen != static_cast<ssize_t>(sBuf.length())) {
+            if (sendLen != static_cast<ssize_t>(send_buf.length())) {
                 std::cerr << "Warning: Incomplete send." << std::endl;
             }
 
             // --- 如果是 PLAY 请求，开始模拟发送 RTP 数据 ---
             if (playing) {
-                std::cout << "===> Start 'streaming' (simulation) for client " << clientIP << ":"
+                std::cout << "===> Start 'streaming' (simulation) for client " << ip << ":"
                           << clientRtpPort << std::endl;
 
                 // **注意:** 这里的循环只是模拟时间流逝，并没有真正实现 RTP 打包和发送。
@@ -298,7 +295,7 @@ void doClient(int clientSockfd, const std::string& clientIP, int clientPort) {
                     // 检查客户端是否仍然连接 (尝试读取少量数据，非阻塞或带超时)
                     // poll 或 select 可以用来检测连接是否断开或是否有 TEARDOWN 请求
                     char peek_buf[1];
-                    ssize_t peek_len = recv(clientSockfd, peek_buf, 1, MSG_DONTWAIT | MSG_PEEK);
+                    ssize_t peek_len = recv(connfd, peek_buf, 1, MSG_DONTWAIT | MSG_PEEK);
                     if (peek_len == 0) {  // 客户端断开
                         std::cout << "Client disconnected during streaming." << std::endl;
                         playing = false;
@@ -324,29 +321,29 @@ void doClient(int clientSockfd, const std::string& clientIP, int clientPort) {
             }
         }
     } catch (const std::exception& e) {
-        std::cerr << "Exception in doClient for " << clientIP << ":" << clientPort << ": "
-                  << e.what() << std::endl;
+        std::cerr << "Exception in doClient for " << ip << ":" << port << ": " << e.what()
+                  << std::endl;
     }
 
     // --- 清理 ---
-    close(clientSockfd);
-    std::cout << "Closed connection for " << clientIP << ":" << clientPort << std::endl;
+    close(connfd);
+    std::cout << "Closed connection for " << ip << ":" << port << std::endl;
 }
 
 // --- 主函数 ---
 int main() {
-    int serverSockfd = -1;  // 初始化为无效值
+    int listenfd = -1;  // 初始化为无效值
 
     try {
         // 1. 创建 TCP Socket
-        serverSockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (serverSockfd < 0) {
+        listenfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (listenfd < 0) {
             throw_system_error("Failed to create socket");
         }
 
         // 2. 设置 SO_REUSEADDR 选项 (允许快速重启服务器绑定相同地址)
         int on = 1;
-        if (setsockopt(serverSockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
+        if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
             // 通常不认为是致命错误，但最好记录下来
             perror("setsockopt(SO_REUSEADDR) failed");
         }
@@ -362,12 +359,12 @@ int main() {
         serverAddr.sin_port = htons(SERVER_PORT);
         serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);  // 绑定到所有网络接口
 
-        if (bind(serverSockfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        if (bind(listenfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
             throw_system_error("Failed to bind socket");
         }
 
         // 4. 开始监听
-        if (listen(serverSockfd, SOMAXCONN) < 0) {  // 使用 SOMAXCONN 作为 backlog
+        if (listen(listenfd, SOMAXCONN) < 0) {  // 使用 SOMAXCONN 作为 backlog
             throw_system_error("Failed to listen on socket");
         }
 
@@ -378,11 +375,11 @@ int main() {
         while (true) {
             struct sockaddr_in clientAddr;
             socklen_t clientAddrLen = sizeof(clientAddr);
-            int clientSockfd = -1;
+            int connfd = -1;
 
-            clientSockfd = accept(serverSockfd, (struct sockaddr*)&clientAddr, &clientAddrLen);
+            connfd = accept(listenfd, (struct sockaddr*)&clientAddr, &clientAddrLen);
 
-            if (clientSockfd < 0) {
+            if (connfd < 0) {
                 // EINTR 表示信号中断，可以继续循环
                 if (errno == EINTR) continue;
                 perror("Failed to accept client connection");
@@ -405,42 +402,41 @@ int main() {
 
             // 处理客户端请求 (这里是串行处理，可以改为多线程或异步)
             try {
-                doClient(clientSockfd, clientIpStr, clientPort);
+                doClient(connfd, clientIpStr, clientPort);
             } catch (const std::exception& e) {
                 std::cerr << "Unhandled exception during client handling: " << e.what()
                           << std::endl;
                 // 确保即使内部异常也关闭 socket
-                close(clientSockfd);
+                close(connfd);
             } catch (...) {
                 std::cerr << "Unknown unhandled exception during client handling." << std::endl;
-                close(clientSockfd);
+                close(connfd);
             }
-            // 注意：doClient 函数内部会 close(clientSockfd)
         }
 
     } catch (const std::system_error& e) {
         std::cerr << "System Error: " << e.what() << " (Code: " << e.code() << ")" << std::endl;
-        if (serverSockfd >= 0) {
-            close(serverSockfd);  // 确保关闭监听 socket
+        if (listenfd >= 0) {
+            close(listenfd);  // 确保关闭监听 socket
         }
         return 1;  // 返回错误码
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
-        if (serverSockfd >= 0) {
-            close(serverSockfd);
+        if (listenfd >= 0) {
+            close(listenfd);
         }
         return 1;
     } catch (...) {
         std::cerr << "Unknown error occurred." << std::endl;
-        if (serverSockfd >= 0) {
-            close(serverSockfd);
+        if (listenfd >= 0) {
+            close(listenfd);
         }
         return 1;
     }
 
     // 正常情况下不会执行到这里，除非循环被中断
-    if (serverSockfd >= 0) {
-        close(serverSockfd);
+    if (listenfd >= 0) {
+        close(listenfd);
         std::cout << "Server socket closed." << std::endl;
     }
 

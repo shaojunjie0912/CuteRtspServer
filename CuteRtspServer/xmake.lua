@@ -4,8 +4,3 @@ target("gemini_test", function ()
     add_includedirs("include", {public = true})
 end)
 
-target("chatgpt_test", function () 
-    set_kind("binary")
-    add_files("src/chatgpt_test.cpp")
-    add_includedirs("include", {public = true})
-end)
