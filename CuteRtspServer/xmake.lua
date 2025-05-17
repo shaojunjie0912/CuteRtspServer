@@ -4,3 +4,8 @@ target("gemini_test", function ()
     add_includedirs("include", {public = true})
 end)
 
+target("cutertspserver", function ()
+    set_kind("static")
+    add_files("src/rtp.cpp")
+    add_includedirs("include", {public = true})
+end)

@@ -2,3 +2,13 @@ build/
 .xmake/
 .cache/
 compile_commands.json
+
+# media
+*.mp4
+*.h264
+*.h265
+*.avi
+*.mkv
+*.flv
+*.wmv
+*.mov
