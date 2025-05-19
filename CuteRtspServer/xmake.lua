@@ -1,5 +1,2 @@
-target("cutertspserver", function ()
-    set_kind("binary")
-    add_files("src/*.cpp")
-    add_includedirs("include", {public = true})
-end)
+includes("h264")
+includes("aac")

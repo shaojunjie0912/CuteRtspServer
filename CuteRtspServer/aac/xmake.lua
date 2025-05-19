@@ -1,0 +1,5 @@
+target("aac_rtsp_server", function ()
+    set_kind("binary")
+    add_files("src/*.cpp")
+    add_includedirs("include", {public = true})
+end)
